@@ -1,184 +1,100 @@
 /*
-*
-* by Lewis Loflin www.bristolwatch.com lewis@bvu.net
-*
-* Using wiringPi by Gordon Henderson
-* https://projects.drogon.net/raspberry-pi/wiringpi/
-* This must be installed first.
-*
-* Port over lcd_i2c.py to C and added improvements.
-* Supports 16x2 and 20x4 screens.
-* This was to learn now the I2C lcd displays operate.
-* There is no warrenty of any kind use at your own risk.
-*
+  Linux userspace test code, simple and mose code directy from the doco.
+  compile like this: gcc linux_userspace.c ../bme280.c -I ../ -o bme280
+  tested: Raspberry Pi.
+  Use like: ./bme280 /dev/i2c-0
 */
-
-#include <wiringPiI2C.h>
-#include <wiringPi.h>
-#include <stdlib.h>
+#include "bme280.h"
+#include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <linux/i2c-dev.h>
+#include <sys/ioctl.h>
+#include <sys/types.h>
+#include <fcntl.h>
 
-// Define some device parameters
-#define I2C_ADDR   0x3f // I2C device address
+int fd;
 
-// Define some device constants
-#define LCD_CHR  1 // Mode - Sending data
-#define LCD_CMD  0 // Mode - Sending command
-
-#define LINE1  0x80 // 1st line
-#define LINE2  0xC0 // 2nd line
-
-#define LCD_BACKLIGHT   0x08  // On
-// LCD_BACKLIGHT = 0x00  # Off
-
-#define ENABLE  0b00000100 // Enable bit
-
-void lcd_init(void);
-void lcd_byte(int bits, int mode);
-void lcd_toggle_enable(int bits);
-
-// added by Lewis
-void typeInt(int i);
-void typeFloat(float myFloat);
-void lcdLoc(int line); //move cursor
-void ClrLcd(void); // clr LCD return home
-void typeln(const char *s);
-void typeChar(char val);
-int fd;  // seen by all subroutines
-
-int main()   {
-
-    if (wiringPiSetup () == -1) exit (1);
-
-    fd = wiringPiI2CSetup(I2C_ADDR);
-
-    //printf("fd = %d ", fd);
-
-    lcd_init(); // setup LCD
-
-    char array1[] = "Hello world!";
-
-    while (1)   {
-
-        lcdLoc(LINE1);
-        typeln("Using wiringPi");
-        lcdLoc(LINE2);
-        typeln("Geany editor.");
-
-        delay(2000);
-        ClrLcd();
-        lcdLoc(LINE1);
-        typeln("I2c  Programmed");
-        lcdLoc(LINE2);
-        typeln("in C not Python.");
-
-        delay(2000);
-        ClrLcd();
-        lcdLoc(LINE1);
-        typeln("Arduino like");
-        lcdLoc(LINE2);
-        typeln("fast and easy.");
-
-        delay(2000);
-        ClrLcd();
-        lcdLoc(LINE1);
-        typeln(array1);
-
-        delay(2000);
-        ClrLcd(); // defaults LINE1
-        typeln("Int  ");
-        int value = 20125;
-        typeInt(value);
-
-        delay(2000);
-        lcdLoc(LINE2);
-        typeln("Float ");
-        float FloatVal = 10045.25989;
-        typeFloat(FloatVal);
-        delay(2000);
-    }
-
+int8_t user_i2c_read(uint8_t id, uint8_t reg_addr, uint8_t *data, uint16_t len)
+{
+    write(fd, &reg_addr,1);
+    read(fd, data, len);
     return 0;
-
 }
 
-
-// float to string
-void typeFloat(float myFloat)   {
-    char buffer[20];
-    sprintf(buffer, "%4.2f",  myFloat);
-    typeln(buffer);
+void user_delay_ms(uint32_t period)
+{
+    usleep(period*1000);
 }
 
-// int to string
-void typeInt(int i)   {
-    char array1[20];
-    sprintf(array1, "%d",  i);
-    typeln(array1);
+int8_t user_i2c_write(uint8_t id, uint8_t reg_addr, uint8_t *data, uint16_t len)
+{
+    int8_t *buf;
+    buf = malloc(len +1);
+    buf[0] = reg_addr;
+    memcpy(buf +1, data, len);
+    write(fd, buf, len +1);
+    free(buf);
+    return 0;
 }
 
-// clr lcd go home loc 0x80
-void ClrLcd(void)   {
-    lcd_byte(0x01, LCD_CMD);
-    lcd_byte(0x02, LCD_CMD);
+void print_sensor_data(struct bme280_data *comp_data)
+{
+#ifdef BME280_FLOAT_ENABLE
+    printf("temp %0.2f, p %0.2f, hum %0.2f\r\n",comp_data->temperature, comp_data->pressure, comp_data->humidity);
+#else
+    printf("temp %ld, p %ld, hum %ld\r\n",comp_data->temperature, comp_data->pressure, comp_data->humidity);
+#endif
 }
 
-// go to location on LCD
-void lcdLoc(int line)   {
-    lcd_byte(line, LCD_CMD);
+int8_t stream_sensor_data_forced_mode(struct bme280_dev *dev)
+{
+    int8_t rslt;
+    uint8_t settings_sel;
+    struct bme280_data comp_data;
+
+    /* Recommended mode of operation: Indoor navigation */
+    dev->settings.osr_h = BME280_OVERSAMPLING_1X;
+    dev->settings.osr_p = BME280_OVERSAMPLING_16X;
+    dev->settings.osr_t = BME280_OVERSAMPLING_2X;
+    dev->settings.filter = BME280_FILTER_COEFF_16;
+
+    settings_sel = BME280_OSR_PRESS_SEL | BME280_OSR_TEMP_SEL | BME280_OSR_HUM_SEL | BME280_FILTER_SEL;
+
+    rslt = bme280_set_sensor_settings(settings_sel, dev);
+
+    printf("Temperature, Pressure, Humidity\r\n");
+    /* Continuously stream sensor data */
+    while (1) {
+        rslt = bme280_set_sensor_mode(BME280_FORCED_MODE, dev);
+        /* Wait for the measurement to complete and print data @25Hz */
+        dev->delay_ms(40);
+        rslt = bme280_get_sensor_data(BME280_ALL, &comp_data, dev);
+        print_sensor_data(&comp_data);
+    }
+    return rslt;
 }
 
-// out char to LCD at current position
-void typeChar(char val)   {
+int main(int argc, char* argv[])
+{
+    struct bme280_dev dev;
+    int8_t rslt = BME280_OK;
 
-    lcd_byte(val, LCD_CHR);
-}
+    if ((fd = open(argv[1], O_RDWR)) < 0) {
+        printf("Failed to open the i2c bus %s", argv[1]);
+        exit(1);
+    }
+    if (ioctl(fd, I2C_SLAVE, 0x76) < 0) {
+        printf("Failed to acquire bus access and/or talk to slave.\n");
+        exit(1);
+    }
+    dev.dev_id = BME280_I2C_ADDR_PRIM;
+    dev.intf = BME280_I2C_INTF;
+    dev.read = user_i2c_read;
+    dev.write = user_i2c_write;
+    dev.delay_ms = user_delay_ms;
 
-
-// this allows use of any size string
-void typeln(const char *s)   {
-
-    while ( *s ) lcd_byte(*(s++), LCD_CHR);
-
-}
-
-void lcd_byte(int bits, int mode)   {
-
-    //Send byte to data pins
-    // bits = the data
-    // mode = 1 for data, 0 for command
-    int bits_high;
-    int bits_low;
-    // uses the two half byte writes to LCD
-    bits_high = mode | (bits & 0xF0) | LCD_BACKLIGHT ;
-    bits_low = mode | ((bits << 4) & 0xF0) | LCD_BACKLIGHT ;
-
-    // High bits
-    wiringPiI2CReadReg8(fd, bits_high);
-    lcd_toggle_enable(bits_high);
-
-    // Low bits
-    wiringPiI2CReadReg8(fd, bits_low);
-    lcd_toggle_enable(bits_low);
-}
-
-void lcd_toggle_enable(int bits)   {
-    // Toggle enable pin on LCD display
-    delayMicroseconds(500);
-    wiringPiI2CReadReg8(fd, (bits | ENABLE));
-    delayMicroseconds(500);
-    wiringPiI2CReadReg8(fd, (bits & ~ENABLE));
-    delayMicroseconds(500);
-}
-
-
-void lcd_init()   {
-    // Initialise display
-    lcd_byte(0x33, LCD_CMD); // Initialise
-    lcd_byte(0x32, LCD_CMD); // Initialise
-    lcd_byte(0x06, LCD_CMD); // Cursor move direction
-    lcd_byte(0x0C, LCD_CMD); // 0x0F On, Blink Off
-    lcd_byte(0x28, LCD_CMD); // Data length, number of lines, font size
-    lcd_byte(0x01, LCD_CMD); // Clear display
-    delayMicroseconds(500);
+    rslt = bme280_init(&dev);
+    stream_sensor_data_forced_mode(&dev);
 }
